@@ -6,7 +6,7 @@ import torch.nn as nn
 from transformers import BertForSequenceClassification, BertTokenizerFast
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 # Local application/library s
 from FallingPlanet.orbit.utils.Metrics import AdvancedMetrics
 from FallingPlanet.orbit.utils.Metrics import TinyEmoBoard
@@ -15,7 +15,31 @@ from tqdm import tqdm
 from FallingPlanet.orbit.utils.callbacks import EarlyStopping
 from FallingPlanet.orbit.models import DeitFineTuneTiny
 from itertools import islice
+from transformers import ViTModel
 
+class EmoVision(nn.Module):
+    def __init__(self, num_labels, image_size=224, from_saved_weights=None):
+        super(EmoVision, self).__init__()
+        self.vit = ViTModel.from_pretrained('facebook/deit-tiny-patch16-224')
+
+        if from_saved_weights:
+            self.vit.load_state_dict(torch.load(from_saved_weights))
+
+        self.classifier = nn.Sequential(
+            nn.Linear(192, 512),  # Adjusted to match DeiT-Tiny's output
+            nn.ReLU(),            # Activation function
+            nn.Linear(512, 256),  # Second additional dense layer
+            nn.ReLU(),            # Activation function
+            nn.Linear(256, num_labels)  # Final layer for classification
+        )
+
+    def forward(self, pixel_values):
+        outputs = self.vit(pixel_values=pixel_values)
+        pooled_output = outputs.last_hidden_state[:, 0]  # Adjusted to use the correct output
+        logits = self.classifier(pooled_output)
+        return logits
+
+    
 class Classifier:
     def __init__(self,model, device, num_labels, log_dir):
         self.model = model.to(device)
@@ -46,32 +70,32 @@ class Classifier:
         total_mcc = 0.0
         total_batches = 0.0
 
-        for data in dataloader:
-            pbar = tqdm(data, desc=f"Training Epoch {epoch}")
+       
+        pbar = tqdm(dataloader, desc=f"Training Epoch {epoch}")
 
-            for batch in pbar:
-                input_ids, attention_masks, labels = [x.to(self.device) for x in batch]
+        for batch in pbar:
+            pixel_values, labels = [x.to(self.device) for x in batch]
 
-                optimizer.zero_grad()
-                outputs = self.model(input_ids, attention_masks)
-                loss = self.compute_loss(outputs, labels)
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            outputs = self.model(pixel_values)
+            loss = self.compute_loss(outputs, labels)
+            loss.backward()
+            optimizer.step()
 
 
-                total_loss += loss.item()
+            total_loss += loss.item()
 
-                # Update and accumulate metrics
-                total_accuracy += self.accuracy(outputs.argmax(dim=1), labels).item()
-                total_precision += self.precision(outputs.argmax(dim=1), labels).item()
-                total_recall += self.recall(outputs.argmax(dim=1), labels).item()
-                total_f1 += self.f1(outputs, labels).item()
-                total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
+            # Update and accumulate metrics
+            total_accuracy += self.accuracy(outputs.argmax(dim=1), labels).item()
+            total_precision += self.precision(outputs.argmax(dim=1), labels).item()
+            total_recall += self.recall(outputs.argmax(dim=1), labels).item()
+            total_f1 += self.f1(outputs, labels).item()
+            total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
 
-                # Update tqdm description with current loss and metrics
-                pbar.set_postfix(loss=total_loss / (pbar.n + 1))
-                total_batches+=1
-            pbar.close()
+            # Update tqdm description with current loss and metrics
+            pbar.set_postfix(loss=total_loss / (pbar.n + 1))
+            total_batches+=1
+        pbar.close()
 
         # Calculate averages
         num_batches = total_batches
@@ -105,27 +129,27 @@ class Classifier:
         num_batches = 0.0
 
         with torch.no_grad():
-            for data in dataloader:
-                pbar = tqdm(data, desc=f"Validation Epoch {epoch}")
-                for batch in pbar:
-                    input_ids, attention_masks, labels = [x.to(self.device) for x in batch]
-                    
-                    outputs = self.model(input_ids, attention_masks)
-                    loss = self.compute_loss(outputs, labels)
+           
+            pbar = tqdm(dataloader, desc=f"Validation Epoch {epoch}")
+            for batch in pbar:
+                pixel_values, labels = [x.to(self.device) for x in batch]
+                
+                outputs = self.model(pixel_values)
+                loss = self.compute_loss(outputs, labels)
 
-                    total_loss += loss.item()
+                total_loss += loss.item()
 
-                    # Update and accumulate metrics
-                    total_accuracy += self.accuracy(outputs.argmax(dim=1), labels).item()
-                    total_precision += self.precision(outputs.argmax(dim=1), labels).item()
-                    total_recall += self.recall(outputs.argmax(dim=1), labels).item()
-                    total_f1 += self.f1(outputs, labels).item()
-                    total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
+                # Update and accumulate metrics
+                total_accuracy += self.accuracy(outputs.argmax(dim=1), labels).item()
+                total_precision += self.precision(outputs.argmax(dim=1), labels).item()
+                total_recall += self.recall(outputs.argmax(dim=1), labels).item()
+                total_f1 += self.f1(outputs, labels).item()
+                total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
 
-                    # Update tqdm description with current loss and metrics
-                    pbar.set_postfix(loss=total_loss / (pbar.n + 1))
-                    num_batches +=1
-                pbar.close()
+                # Update tqdm description with current loss and metrics
+                pbar.set_postfix(loss=total_loss / (pbar.n + 1))
+                num_batches +=1
+            pbar.close()
 
         # Calculate averages
         num_batches = num_batches
@@ -161,25 +185,25 @@ class Classifier:
         }
 
         with torch.no_grad():
-            for data in dataloader:
-                pbar = tqdm(data, desc="Testing")
-                for batch in pbar:
-                    input_ids, attention_masks, labels = [x.to(self.device) for x in batch]
-                    outputs = self.model(input_ids, attention_masks)
+         
+            pbar = tqdm(dataloader, desc="Testing")
+            for batch in pbar:
+                pixel_values, labels = [x.to(self.device) for x in batch]
+                outputs = self.model(pixel_values)
 
-                    # Update and accumulate metrics
-                    aggregated_metrics['total_accuracy'] += self.accuracy(outputs.argmax(dim=1), labels).item()
-                    aggregated_metrics['total_precision'] += self.precision(outputs.argmax(dim=1), labels).item()
-                    aggregated_metrics['total_recall'] += self.recall(outputs.argmax(dim=1), labels).item()
-                    aggregated_metrics['total_f1'] += self.f1(outputs, labels).item()
-                    aggregated_metrics['total_mcc'] += self.mcc(outputs.argmax(dim=1), labels).item()
-                    aggregated_metrics['total_top_2_acc'] += self.top2_acc(outputs, labels).item()
+                # Update and accumulate metrics
+                aggregated_metrics['total_accuracy'] += self.accuracy(outputs.argmax(dim=1), labels).item()
+                aggregated_metrics['total_precision'] += self.precision(outputs.argmax(dim=1), labels).item()
+                aggregated_metrics['total_recall'] += self.recall(outputs.argmax(dim=1), labels).item()
+                aggregated_metrics['total_f1'] += self.f1(outputs, labels).item()
+                aggregated_metrics['total_mcc'] += self.mcc(outputs.argmax(dim=1), labels).item()
+                aggregated_metrics['total_top_2_acc'] += self.top2_acc(outputs, labels).item()
 
-                    # Update tqdm description with current metrics
-                    pbar.set_postfix({
-                        'Accuracy': aggregated_metrics['total_accuracy'] / (pbar.n + 1),
-                        'MCC': aggregated_metrics['total_mcc'] / (pbar.n + 1)
-                    })
+                # Update tqdm description with current metrics
+                pbar.set_postfix({
+                    'Accuracy': aggregated_metrics['total_accuracy'] / (pbar.n + 1),
+                    'MCC': aggregated_metrics['total_mcc'] / (pbar.n + 1)
+                })
 
         # Calculate average metrics
         num_batches = len(dataloader)
@@ -188,27 +212,35 @@ class Classifier:
 
         return aggregated_metrics
 
-def create_dataloaders(file_path, batch_size=64):
-    dataloaders = []
-    for filename in os.listdir(file_path):
-        if filename.endswith('.pt'):
-            full_path = os.path.join(file_path, filename)
-            data, labels = torch.load(full_path)
-            dataset = TensorDataset(data, labels)
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-            dataloaders.append(dataloader)
-    return dataloaders
+
+
+def create_combined_dataloader(file_paths, batch_size=64):
+    datasets = []
+    for file_path in file_paths:
+        data, labels = torch.load(file_path)
+        dataset = TensorDataset(data, labels)
+        datasets.append(dataset)
     
+    combined_dataset = ConcatDataset(datasets)
+    dataloader = DataLoader(combined_dataset, batch_size=batch_size, shuffle=True)
+    
+    return dataloader    
 def main(mode = "full"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    train_file_path = r"E:\facial_recognition_datasets\train_set"
-    test_file_path = r"E:\facial_recognition_datasets\test_set"
-    val_file_path = r"E:\facial_recognition_datasets\val_set"
+    train_folder = r"E:\facial_recognition_datasets\train_set"
+    test_folder = r"E:\facial_recognition_datasets\test_set"
+    val_folder = r"E:\facial_recognition_datasets\val_set"
     
-    train_dataloaders = create_dataloaders(train_file_path,batch_size=64)
-    val_dataloaders = create_dataloaders(val_file_path,batch_size=64)
-    test_dataloaders= create_dataloaders(test_file_path,batch_size=64)
+    # Retrieve all .pt file paths from each directory
+    train_files = [os.path.join(train_folder, file) for file in os.listdir(train_folder) if file.endswith('.pt')]
+    val_files = [os.path.join(val_folder, file) for file in os.listdir(val_folder) if file.endswith('.pt')]
+    test_files = [os.path.join(test_folder, file) for file in os.listdir(test_folder) if file.endswith('.pt')]
+
+    # Create combined dataloaders
+    train_dataloader = create_combined_dataloader(train_files, batch_size=64)
+    val_dataloader = create_combined_dataloader(val_files, batch_size=64)
+    test_dataloader = create_combined_dataloader(test_files, batch_size=64)
 
 
     
@@ -220,20 +252,20 @@ def main(mode = "full"):
     
  
     NUM_EMOTION_LABELS = 9
-    LOG_DIR = r"EmoBERTv2-tiny\logging"
+    LOG_DIR = r"EmoVision\logging"
     
 
-    model = DeitFineTuneTiny(num_tasks=1, num_labels=[9])
+    model = DeitFineTuneTiny(num_tasks=1 ,num_labels=[NUM_EMOTION_LABELS])
     optimizer = torch.optim.AdamW(model.parameters(),lr =1e-5, weight_decay=1e-6)
     classifier = Classifier(model, device,  NUM_EMOTION_LABELS, LOG_DIR)
 
     if mode in ["train", "full"]:
         # Your training logic here
-        early_stopping = EarlyStopping(patience=50, min_delta=1e-8)  # Initialize Early Stopping
-        num_epochs = 75
+        early_stopping = EarlyStopping(patience=100, min_delta=1e-8)  # Initialize Early Stopping
+        num_epochs = 6
         for epoch in range(num_epochs):
-            classifier.train_step(train_dataloaders, optimizer, epoch)
-            val_loss = classifier.val_step(val_dataloaders, epoch)
+            classifier.train_step(train_dataloader, optimizer, epoch)
+            val_loss = classifier.val_step(val_dataloader, epoch)
 
             if early_stopping.step(val_loss, classifier.model):
                 print("Early stopping triggered. Restoring best model weights.")
@@ -247,7 +279,7 @@ def main(mode = "full"):
         if os.path.exists('EmoVision-tiny.pth'):
             classifier.model.load_state_dict(torch.load('EmoVision-tiny.pth'))
     # Assuming you have test_step implemented in classifier
-    test_results = classifier.test_step(test_dataloaders)
+    test_results = classifier.test_step(test_dataloader)
     print("Test Results:", test_results)
 
 

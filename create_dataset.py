@@ -4,16 +4,14 @@ from torchvision import transforms
 import torch
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset
+from transformers import ViTImageProcessor
 
 def load_and_preprocess_images(image_root_folder, image_size, exclude_label):
-    transforms_pipeline = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    feature_extractor = ViTImageProcessor(size=image_size)
     all_images = []
     all_labels = []
     label_dict = {}
+
     for root, dirs, files in os.walk(image_root_folder):
         for file in files:
             if file.endswith((".jpg", ".png", ".jpeg")):
@@ -21,10 +19,11 @@ def load_and_preprocess_images(image_root_folder, image_size, exclude_label):
                 if label != exclude_label:
                     image_path = os.path.join(root, file)
                     image = Image.open(image_path).convert("RGB")
-                    image_tensor = transforms_pipeline(image)
+                    image_tensor = feature_extractor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
                     all_images.append(image_tensor)
                     int_label = label_dict.setdefault(label, len(label_dict))
                     all_labels.append(int_label)
+
     return all_images, all_labels
 
 def save_batches(images, labels, output_folder, batch_size):
