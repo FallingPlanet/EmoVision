@@ -228,9 +228,9 @@ def create_combined_dataloader(file_paths, batch_size=64):
 def main(mode = "full"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    train_folder = r"E:\facial_recognition_datasets\train_set"
-    test_folder = r"E:\facial_recognition_datasets\test_set"
-    val_folder = r"E:\facial_recognition_datasets\val_set"
+    train_folder = r"E:\facial_recognition_datasets\train_set_augmented"
+    test_folder = r"E:\facial_recognition_datasets\test_set_augmented"
+    val_folder = r"E:\facial_recognition_datasets\val_set_augmented"
     
     # Retrieve all .pt file paths from each directory
     train_files = [os.path.join(train_folder, file) for file in os.listdir(train_folder) if file.endswith('.pt')]
@@ -256,13 +256,13 @@ def main(mode = "full"):
     
 
     model = DeitFineTuneTiny(num_tasks=1 ,num_labels=[NUM_EMOTION_LABELS])
-    optimizer = torch.optim.AdamW(model.parameters(),lr =1e-5, weight_decay=1e-6)
+    optimizer = torch.optim.AdamW(model.parameters(),lr =1e-5, weight_decay=1e-10)
     classifier = Classifier(model, device,  NUM_EMOTION_LABELS, LOG_DIR)
 
     if mode in ["train", "full"]:
         # Your training logic here
-        early_stopping = EarlyStopping(patience=100, min_delta=1e-8)  # Initialize Early Stopping
-        num_epochs = 6
+        early_stopping = EarlyStopping(patience=100, min_delta=1e-11)  # Initialize Early Stopping
+        num_epochs = 5
         for epoch in range(num_epochs):
             classifier.train_step(train_dataloader, optimizer, epoch)
             val_loss = classifier.val_step(val_dataloader, epoch)
@@ -273,11 +273,11 @@ def main(mode = "full"):
                 break
 
         if early_stopping.best_state is not None:
-            torch.save(early_stopping.best_state, 'EmoVision-tiny.pth')
+            torch.save(early_stopping.best_state, 'EmoVision_augmented-tiny.pth')
 
     if mode in ["test", "full"]:
-        if os.path.exists('EmoVision-tiny.pth'):
-            classifier.model.load_state_dict(torch.load('EmoVision-tiny.pth'))
+        if os.path.exists('EmoVision_augmented-tiny.pth'):
+            classifier.model.load_state_dict(torch.load('EmoVision_augmented-tiny.pth'))
     # Assuming you have test_step implemented in classifier
     test_results = classifier.test_step(test_dataloader)
     print("Test Results:", test_results)
