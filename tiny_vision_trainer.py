@@ -6,7 +6,7 @@ import torch.nn as nn
 from transformers import BertForSequenceClassification, BertTokenizerFast
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
+from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
 # Local application/library s
 from FallingPlanet.orbit.utils.Metrics import AdvancedMetrics
 from FallingPlanet.orbit.utils.Metrics import TinyEmoBoard
@@ -32,7 +32,8 @@ class EmoVision(nn.Module):
             nn.ReLU(),            # Activation function
             nn.Linear(256, num_labels)  # Final layer for classification
         )
-
+    
+    
     def forward(self, pixel_values):
         outputs = self.vit(pixel_values=pixel_values)
         pooled_output = outputs.last_hidden_state[:, 0]  # Adjusted to use the correct output
@@ -58,7 +59,11 @@ class Classifier:
     def compute_loss(self,logits, labels):
         loss = self.loss_criterion(logits,labels)
         return loss
+    def count_parameters(self):
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
     
+    from tqdm import tqdm
+
     def train_step(self, dataloader, optimizer, epoch):
         self.model.train()
         total_loss = 0.0
@@ -70,7 +75,6 @@ class Classifier:
         total_mcc = 0.0
         total_batches = 0.0
 
-       
         pbar = tqdm(dataloader, desc=f"Training Epoch {epoch}")
 
         for batch in pbar:
@@ -78,10 +82,27 @@ class Classifier:
 
             optimizer.zero_grad()
             outputs = self.model(pixel_values)
-            loss = self.compute_loss(outputs, labels)
-            loss.backward()
-            optimizer.step()
 
+            # Check for bad values in model outputs
+            if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                print("NaN or Inf found in model outputs")
+                continue
+
+            loss = self.compute_loss(outputs, labels)
+
+            # Check for NaN/Inf in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("NaN or Inf found in loss")
+                continue
+
+            loss.backward()
+
+            # Check for NaN/Inf in gradients
+            if any(torch.isnan(param.grad).any() or torch.isinf(param.grad).any() for param in self.model.parameters() if param.grad is not None):
+                print("NaN or Inf found in gradients")
+                continue
+
+            optimizer.step()
 
             total_loss += loss.item()
 
@@ -93,8 +114,10 @@ class Classifier:
             total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
 
             # Update tqdm description with current loss and metrics
-            pbar.set_postfix(loss=total_loss / (pbar.n + 1))
-            total_batches+=1
+            current_accuracy = self.accuracy(outputs.argmax(dim=1), labels).item()
+            pbar.set_postfix(loss=total_loss / (pbar.n + 1),accuracy = current_accuracy)
+            total_batches += 1
+
         pbar.close()
 
         # Calculate averages
@@ -114,13 +137,13 @@ class Classifier:
         self.writer.log_scalar('Training/Average F1', avg_f1, epoch)
         self.writer.log_scalar('Training/Average MCC', avg_mcc, epoch)
 
+
         
 
 
     def val_step(self, dataloader, epoch):
         self.model.eval()
         total_loss = 0.0
-        # Initialize metric accumulators
         total_accuracy = 0.0
         total_precision = 0.0
         total_recall = 0.0
@@ -129,30 +152,36 @@ class Classifier:
         num_batches = 0.0
 
         with torch.no_grad():
-           
             pbar = tqdm(dataloader, desc=f"Validation Epoch {epoch}")
             for batch in pbar:
                 pixel_values, labels = [x.to(self.device) for x in batch]
-                
                 outputs = self.model(pixel_values)
+
+                # Check for NaN or Inf in outputs
+                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                    print("NaN or Inf found in validation outputs, skipping batch")
+                    continue
+
                 loss = self.compute_loss(outputs, labels)
+
+                # Check for NaN or Inf in loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print("NaN or Inf found in validation loss, skipping batch")
+                    continue
 
                 total_loss += loss.item()
 
-                # Update and accumulate metrics
                 total_accuracy += self.accuracy(outputs.argmax(dim=1), labels).item()
                 total_precision += self.precision(outputs.argmax(dim=1), labels).item()
                 total_recall += self.recall(outputs.argmax(dim=1), labels).item()
                 total_f1 += self.f1(outputs, labels).item()
                 total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
 
-                # Update tqdm description with current loss and metrics
-                pbar.set_postfix(loss=total_loss / (pbar.n + 1))
-                num_batches +=1
+                current_accuracy = self.accuracy(outputs.argmax(dim=1), labels).item()
+                pbar.set_postfix(loss=total_loss / (pbar.n + 1),accuracy = current_accuracy)
+                num_batches += 1
             pbar.close()
 
-        # Calculate averages
-        num_batches = num_batches
         avg_val_loss = total_loss / num_batches
         avg_accuracy = total_accuracy / num_batches
         avg_precision = total_precision / num_batches
@@ -160,7 +189,6 @@ class Classifier:
         avg_f1 = total_f1 / num_batches
         avg_mcc = total_mcc / num_batches
 
-        # Log metrics to TensorBoard
         self.writer.log_scalar('Validation/Average Loss', avg_val_loss, epoch)
         self.writer.log_scalar('Validation/Average Accuracy', avg_accuracy, epoch)
         self.writer.log_scalar('Validation/Average Precision', avg_precision, epoch)
@@ -168,7 +196,6 @@ class Classifier:
         self.writer.log_scalar('Validation/Average F1', avg_f1, epoch)
         self.writer.log_scalar('Validation/Average MCC', avg_mcc, epoch)
 
-        
         return avg_val_loss
  
         
@@ -214,17 +241,23 @@ class Classifier:
 
 
 
-def create_combined_dataloader(file_paths, batch_size=64):
-    datasets = []
-    for file_path in file_paths:
-        data, labels = torch.load(file_path)
-        dataset = TensorDataset(data, labels)
-        datasets.append(dataset)
-    
-    combined_dataset = ConcatDataset(datasets)
-    dataloader = DataLoader(combined_dataset, batch_size=batch_size, shuffle=True)
-    
-    return dataloader    
+class CustomDataset(Dataset):
+    def __init__(self, file_paths):
+        self.file_paths = file_paths
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        file_path = self.file_paths[idx]
+        data = torch.load(file_path)
+        return data['image'], data['label']
+
+def create_combined_dataloader(file_paths, batch_size=32):
+    dataset = CustomDataset(file_paths)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return dataloader
+
 def main(mode = "full"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -238,9 +271,9 @@ def main(mode = "full"):
     test_files = [os.path.join(test_folder, file) for file in os.listdir(test_folder) if file.endswith('.pt')]
 
     # Create combined dataloaders
-    train_dataloader = create_combined_dataloader(train_files, batch_size=64)
-    val_dataloader = create_combined_dataloader(val_files, batch_size=64)
-    test_dataloader = create_combined_dataloader(test_files, batch_size=64)
+    train_dataloader = create_combined_dataloader(train_files, batch_size=32)
+    val_dataloader = create_combined_dataloader(val_files, batch_size=32)
+    test_dataloader = create_combined_dataloader(test_files, batch_size=32)
 
 
     
@@ -251,18 +284,19 @@ def main(mode = "full"):
     
     
  
-    NUM_EMOTION_LABELS = 9
+    NUM_EMOTION_LABELS = 8
     LOG_DIR = r"EmoVision\logging"
     
 
     model = DeitFineTuneTiny(num_tasks=1 ,num_labels=[NUM_EMOTION_LABELS])
-    optimizer = torch.optim.AdamW(model.parameters(),lr =1e-5, weight_decay=1e-10)
+    optimizer = torch.optim.AdamW(model.parameters(),lr =1e-4, weight_decay=1e-10)
     classifier = Classifier(model, device,  NUM_EMOTION_LABELS, LOG_DIR)
-
+    total_params = classifier.count_parameters()
+    print(f"Total trainable parameters: {total_params}")
     if mode in ["train", "full"]:
         # Your training logic here
         early_stopping = EarlyStopping(patience=100, min_delta=1e-11)  # Initialize Early Stopping
-        num_epochs = 5
+        num_epochs = 50
         for epoch in range(num_epochs):
             classifier.train_step(train_dataloader, optimizer, epoch)
             val_loss = classifier.val_step(val_dataloader, epoch)

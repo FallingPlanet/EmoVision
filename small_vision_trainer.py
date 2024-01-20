@@ -260,4 +260,4 @@ def main(mode = "full"):
 
 
 if __name__ == "__main__":
-    main(mode="full")  # or "train" or "test"  
+    main(mode="test")  # or "train" or "test"  
