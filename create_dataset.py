@@ -12,7 +12,7 @@ def get_label_from_path(file_path):
             return label
     return None  # Return None if no label is found
 
-def load_and_preprocess_images(file_paths, image_size, output_folder, num_augmented_copies=2, is_train=False):
+def load_and_preprocess_images(file_paths, image_size, output_folder,label_dict, num_augmented_copies=2, is_train=False):
     feature_extractor = ViTImageProcessor(size=image_size, do_rescale=False)
 
     pil_transforms = T.Compose([
@@ -31,11 +31,12 @@ def load_and_preprocess_images(file_paths, image_size, output_folder, num_augmen
     for idx, file_path in enumerate(file_paths):
         label = get_label_from_path(file_path)
         if label is not None:
+            int_label = label_dict[label]  # Get integer label from label_dict
             image = Image.open(file_path).convert("RGB")
             img_tensor = T.ToTensor()(image).to(torch.float32)
             processed_original = feature_extractor(images=img_tensor.unsqueeze(0), return_tensors="pt")["pixel_values"].squeeze(0)
 
-            save_image_with_label(processed_original, label, os.path.join(output_folder, f'image_{idx}.pt'))
+            save_image_with_label(processed_original, int_label, os.path.join(output_folder, f'image_{idx}.pt'))
 
             if is_train:
                 for aug_idx in range(num_augmented_copies):
@@ -43,10 +44,12 @@ def load_and_preprocess_images(file_paths, image_size, output_folder, num_augmen
                     img_tensor = T.ToTensor()(aug_img).to(torch.float32)
                     img_tensor = tensor_transforms(img_tensor)
                     processed_aug = feature_extractor(images=img_tensor.unsqueeze(0), return_tensors="pt")["pixel_values"].squeeze(0)
-                    save_image_with_label(processed_aug, label, os.path.join(output_folder, f'image_{idx}_aug_{aug_idx}.pt'))
+                    save_image_with_label(processed_aug, int_label, os.path.join(output_folder, f'image_{idx}_aug_{aug_idx}.pt'))  # Use int_label
 
 def save_image_with_label(image_tensor, label, file_path):
-    torch.save({"image": image_tensor, "label": label}, file_path)
+    label_tensor = torch.tensor(label, dtype=torch.long)  # Convert label to tensor
+    torch.save({"image": image_tensor, "label": label_tensor}, file_path)
+
 
 def split_dataset(image_root_folder, exclude_label):
     all_file_paths = []
@@ -66,13 +69,15 @@ def split_dataset(image_root_folder, exclude_label):
     return train_test_split(all_file_paths, all_labels, train_size=0.7, random_state=42)
 
 def split_and_batch_dataset(image_root_folder, output_folders, image_size, exclude_label):
+    labels = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+    label_dict = {label: i for i, label in enumerate(labels)}
+
     train_paths, test_val_paths, train_labels, test_val_labels = split_dataset(image_root_folder, exclude_label)
     val_paths, test_paths, val_labels, test_labels = train_test_split(test_val_paths, test_val_labels, train_size=0.5, random_state=42)
 
-    load_and_preprocess_images(train_paths, image_size, output_folders['train'], is_train=True, num_augmented_copies=3)
-    load_and_preprocess_images(val_paths, image_size, output_folders['val'], is_train=False)
-    load_and_preprocess_images(test_paths, image_size, output_folders['test'], is_train=False)
-
+    load_and_preprocess_images(train_paths, image_size, output_folders['train'], label_dict, is_train=True, num_augmented_copies=3)
+    load_and_preprocess_images(val_paths, image_size, output_folders['val'], label_dict, is_train=False)
+    load_and_preprocess_images(test_paths, image_size, output_folders['test'], label_dict, is_train=False)
 
 
 
@@ -83,5 +88,6 @@ output_folders = {
     'val': r"E:\facial_recognition_datasets\val_set_augmented",
     'test': r"E:\facial_recognition_datasets\test_set_augmented"
 }
+
 split_and_batch_dataset(file_path, output_folders, image_size=224, exclude_label="contempt")
    
