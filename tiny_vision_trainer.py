@@ -56,9 +56,9 @@ class Classifier:
         
         
         self.accuracy = torchmetrics.Accuracy(num_classes=num_labels, task='multiclass').to(device)
-        self.precision = torchmetrics.Precision(num_classes=num_labels, task='multiclass').to(device)
-        self.recall = torchmetrics.Recall(num_classes=num_labels, task='multiclass').to(device)
-        self.f1= torchmetrics.F1Score(num_classes=num_labels, task = 'multiclass').to(device)
+        self.precision = torchmetrics.Precision(average = 'macro' ,num_classes=num_labels, task='multiclass').to(device)
+        self.recall = torchmetrics.Recall(average = 'macro', num_classes=num_labels, task='multiclass').to(device)
+        self.f1= torchmetrics.F1Score(average = 'macro', num_classes=num_labels, task = 'multiclass').to(device)
         self.mcc = torchmetrics.MatthewsCorrCoef(num_classes=num_labels,task = 'multiclass').to(device)
         self.top2_acc = torchmetrics.Accuracy(top_k=2, num_classes=num_labels,task='multiclass').to(device)
         
@@ -81,88 +81,62 @@ class Classifier:
         total_batches = 0.0
 
         pbar = tqdm(dataloader, desc=f"Training Epoch {epoch}")
-        optimizer.zero_grad()  # Initialize gradient accumulation
-
-        steps = 0
-        checkpoint_file = 'latest_checkpoint.pth'
+        optimizer.zero_grad()
 
         for batch in pbar:
             pixel_values, labels = batch
             pixel_values = pixel_values.to(self.device)
             labels = labels.to(self.device)
 
-            with autocast():  # Enable automatic mixed precision
-                outputs = self.model(pixel_values)
-                loss = self.compute_loss(outputs, labels) / accumulation_steps
+            outputs = self.model(pixel_values)
+            loss = self.compute_loss(outputs, labels) / accumulation_steps
 
-                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
-                    print("NaN or Inf found in model outputs")
-                    continue
+            # Check for NaN values in outputs and loss
+            if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                print("NaN or Inf found in model outputs, skipping batch")
+                continue
 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print("NaN or Inf found in loss")
-                    continue
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("NaN or Inf found in loss, skipping batch")
+                continue
 
-            self.scaler.scale(loss).backward()
+            loss.backward()
 
-            if (steps + 1) % accumulation_steps == 0:
-                self.scaler.step(optimizer)
-                self.scaler.update()
+            if (total_batches + 1) % accumulation_steps == 0:
+                optimizer.step()
                 optimizer.zero_grad()
 
             total_loss += loss.item() * accumulation_steps
 
-            # Calculate metrics for the current batch
-            current_accuracy = self.accuracy(outputs.argmax(dim=1), labels).item()
-            current_precision = self.precision(outputs.argmax(dim=1), labels).item()
-            current_recall = self.recall(outputs.argmax(dim=1), labels).item()
-            current_f1 = self.f1(outputs, labels).item()
-            current_mcc = self.mcc(outputs.argmax(dim=1), labels).item()
+            # Detach and accumulate metrics
+            total_accuracy += self.accuracy(outputs.detach(), labels).item()
+            total_precision += self.precision(outputs.detach(), labels).item()
+            total_recall += self.recall(outputs.detach(), labels).item()
+            total_f1 += self.f1(outputs.detach(), labels).item()
+            total_mcc += self.mcc(outputs.detach(), labels).item()
 
-            # Accumulate metrics
-            total_accuracy += current_accuracy
-            total_precision += current_precision
-            total_recall += current_recall
-            total_f1 += current_f1
-            total_mcc += current_mcc
+            pbar.set_postfix(loss=total_loss / (total_batches + 1), accuracy=total_accuracy / (total_batches + 1))
 
-            pbar.set_postfix(loss=total_loss / (pbar.n + 1), accuracy=current_accuracy)
-
-            if (steps + 1) % 1000 == 0:
-                checkpoint = {
-                    'epoch': epoch,
-                    'step': steps + 1,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss.item(),
-                }
-                torch.save(checkpoint, checkpoint_file)
-                print(f"Checkpoint saved at step {steps + 1} of epoch {epoch}")
-
+            # Memory cleanup
             del pixel_values, labels, outputs, loss
             gc.collect()
+            torch.cuda.empty_cache()  # Free up memory on the GPU
 
-            steps += 1
             total_batches += 1
 
         pbar.close()
 
-        num_batches = total_batches
-        avg_accuracy = total_accuracy / num_batches
-        avg_precision = total_precision / num_batches
-        avg_recall = total_recall / num_batches
-        avg_f1 = total_f1 / num_batches
-        avg_mcc = total_mcc / num_batches
-        avg_train_loss = total_loss / num_batches
-
-        self.writer.log_scalar('Training/Average Loss', avg_train_loss, epoch)
-        self.writer.log_scalar('Training/Average Accuracy', avg_accuracy, epoch)
-        self.writer.log_scalar('Training/Average Precision', avg_precision, epoch)
-        self.writer.log_scalar('Training/Average Recall', avg_recall, epoch)
-        self.writer.log_scalar('Training/Average F1', avg_f1, epoch)
-        self.writer.log_scalar('Training/Average MCC', avg_mcc, epoch)
+        # Calculate average metrics
+        avg_train_loss = total_loss / total_batches
+        avg_accuracy = total_accuracy / total_batches
+        avg_precision = total_precision / total_batches
+        avg_recall = total_recall / total_batches
+        avg_f1 = total_f1 / total_batches
+        avg_mcc = total_mcc / total_batches
 
         return avg_train_loss
+
+       
 
 
 
@@ -177,7 +151,7 @@ class Classifier:
         total_recall = 0.0
         total_f1 = 0.0
         total_mcc = 0.0
-        num_batches = 0.0
+        num_batches = 0
 
         with torch.no_grad():
             pbar = tqdm(dataloader, desc=f"Validation Epoch {epoch}")
@@ -204,6 +178,8 @@ class Classifier:
                 total_f1 += self.f1(outputs, labels).item()
                 total_mcc += self.mcc(outputs.argmax(dim=1), labels).item()
 
+                num_batches += 1
+
                 current_loss = total_loss / num_batches
                 current_accuracy = total_accuracy / num_batches
                 pbar.set_postfix(loss=current_loss, accuracy=current_accuracy)
@@ -211,16 +187,14 @@ class Classifier:
                 del pixel_values, labels, outputs, loss  # Free up memory
                 gc.collect()  # Invoke garbage collector
 
-                num_batches += 1
-
             pbar.close()
 
-        avg_val_loss = total_loss / num_batches
-        avg_accuracy = total_accuracy / num_batches
-        avg_precision = total_precision / num_batches
-        avg_recall = total_recall / num_batches
-        avg_f1 = total_f1 / num_batches
-        avg_mcc = total_mcc / num_batches
+        avg_val_loss = total_loss / num_batches if num_batches > 0 else 0
+        avg_accuracy = total_accuracy / num_batches if num_batches > 0 else 0
+        avg_precision = total_precision / num_batches if num_batches > 0 else 0
+        avg_recall = total_recall / num_batches if num_batches > 0 else 0
+        avg_f1 = total_f1 / num_batches if num_batches > 0 else 0
+        avg_mcc = total_mcc / num_batches if num_batches > 0 else 0
 
         self.writer.log_scalar('Validation/Average Loss', avg_val_loss, epoch)
         self.writer.log_scalar('Validation/Average Accuracy', avg_accuracy, epoch)
@@ -230,6 +204,7 @@ class Classifier:
         self.writer.log_scalar('Validation/Average MCC', avg_mcc, epoch)
 
         return avg_val_loss
+
 
  
         
@@ -293,28 +268,20 @@ class Classifier:
 class CustomDataset(Dataset):
     def __init__(self, file_paths):
         self.file_paths = file_paths
-        self.label_encoder = LabelEncoder()
-        self.data_cache = {}  # Cache to store recently loaded data
 
-    def _load_data(self, file_path):
-        if file_path not in self.data_cache:
-            # Load and cache the data
-            data = torch.load(file_path)
-            self.data_cache[file_path] = data
-        return self.data_cache[file_path]
     def __len__(self):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
         file_path = self.file_paths[idx]
-        data = self._load_data(file_path)
+        data = torch.load(file_path)  # Load data directly from file
         image = data['image']
         label_tensor = data['label']
         return image, label_tensor
-    
+
 def create_combined_dataloader(file_paths, batch_size=4):
     dataset = CustomDataset(file_paths)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)  # Use multiple workers
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)  # Consider adding num_workers for parallel loading
     return dataloader
 
 
@@ -329,9 +296,9 @@ def main(mode="full"):
     val_files = [os.path.join(val_folder, file) for file in os.listdir(val_folder) if file.endswith('.pt')]
     test_files = [os.path.join(test_folder, file) for file in os.listdir(test_folder) if file.endswith('.pt')]
 
-    train_dataloader = create_combined_dataloader(train_files, batch_size=16)
-    val_dataloader = create_combined_dataloader(val_files, batch_size=16)
-    test_dataloader = create_combined_dataloader(test_files, batch_size=16)
+    train_dataloader = create_combined_dataloader(train_files, batch_size=32)
+    val_dataloader = create_combined_dataloader(val_files, batch_size=32)
+    test_dataloader = create_combined_dataloader(test_files, batch_size=32)
     
     NUM_EMOTION_LABELS = 8
     LOG_DIR = r"EmoVision\logging"
@@ -367,7 +334,7 @@ def main(mode="full"):
     if mode in ["train", "full"]:
         # Your training logic here
         early_stopping = EarlyStopping(patience=5, min_delta=1e-11)  # Initialize Early Stopping
-        num_epochs = 50
+        num_epochs = 3
         for epoch in range(num_epochs):
             classifier.train_step(train_dataloader, optimizer, epoch)
             val_loss = classifier.val_step(val_dataloader, epoch)
@@ -388,4 +355,4 @@ def main(mode="full"):
             
     
 if __name__ == "__main__":
-    main(mode="test_checkpoint")  # or "train" or "test"  
+    main(mode="test")  # or "train" or "test"  
